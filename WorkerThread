@@ -1,0 +1,227 @@
+import java.util.ArrayList;
+import java.util.List;
+
+// workerthread.java
+
+// each worker owns a region and handles all circles inside it.
+// communicates only via message queues (no shared objects).
+
+// rough flow each tick:
+// - move circles
+// - handle local collisions
+// - send transfers / boundary info / state
+// - wait for next tick
+
+public class WorkerThread extends Thread {
+
+    private final int workerIndex;
+
+    private final Region region;
+    private final MessageQueue inQueue;
+    private final MessageQueue outQueue;
+
+    // local circle storage (never shared)
+    // [id, x, y, dx, dy, radius, r, g, b]
+    private final List<double[]> circles = new ArrayList<>();
+
+    private volatile boolean running = true;
+
+    private final int screenW;
+    private final int screenH;
+    private final int numWorkers;
+
+    public WorkerThread(int workerIndex,
+                        Region region,
+                        MessageQueue inQueue,
+                        MessageQueue outQueue,
+                        int screenW,
+                        int screenH,
+                        int numWorkers) {
+
+        this.workerIndex = workerIndex;
+        this.region      = region;
+        this.inQueue     = inQueue;
+        this.outQueue    = outQueue;
+        this.screenW     = screenW;
+        this.screenH     = screenH;
+        this.numWorkers  = numWorkers;
+
+        setName("Worker-" + workerIndex);
+        setDaemon(true);
+    }
+
+    @Override
+    public void run() {
+        while (running) {
+            try {
+                String msg = inQueue.receive();
+                if (msg == null) break;
+
+                switch (MessageParser.getType(msg)) {
+                    case "INIT":
+                    case "ASSIGN":
+                        handleAssign(msg);
+                        break;
+
+                    case "TICK":
+                        handleTick();
+                        break;
+
+                    case "UPDATE":
+                        handleUpdate(msg);
+                        break;
+
+                    case "SHUTDOWN":
+                        running = false;
+                        break;
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
+
+    // ── message handlers
+
+    // add a new circle to this worker
+    private void handleAssign(String msg) {
+        double[] parsed = MessageParser.parseInit(msg);
+
+        circles.add(new double[] {
+            parsed[0], parsed[1], parsed[2],
+            parsed[3], parsed[4], parsed[5],
+            parsed[6], parsed[7], parsed[8]
+        });
+    }
+
+    // process one simulation step
+    private void handleTick() throws InterruptedException {
+
+        // move circles + bounce off outer walls
+        for (double[] c : circles) {
+            c[1] += c[3];
+            c[2] += c[4];
+
+            if (c[1] - c[5] <= 0) {
+                c[1] = c[5];
+                c[3] = Math.abs(c[3]);
+            }
+
+            if (c[1] + c[5] >= screenW) {
+                c[1] = screenW - c[5];
+                c[3] = -Math.abs(c[3]);
+            }
+
+            if (c[2] - c[5] <= 0) {
+                c[2] = c[5];
+                c[4] = Math.abs(c[4]);
+            }
+
+            if (c[2] + c[5] >= screenH) {
+                c[2] = screenH - c[5];
+                c[4] = -Math.abs(c[4]);
+            }
+        }
+
+        // local collisions (naive n^2, fine for region-sized chunks)
+        for (int i = 0; i < circles.size(); i++) {
+            for (int j = i + 1; j < circles.size(); j++) {
+
+                double[] a = circles.get(i);
+                double[] b = circles.get(j);
+
+                double dx = b[1] - a[1];
+                double dy = b[2] - a[2];
+
+                double dist = Math.sqrt(dx * dx + dy * dy);
+                double minDist = a[5] + b[5];
+
+                if (dist > 0 && dist < minDist) {
+
+                    double nx = dx / dist;
+                    double ny = dy / dist;
+
+                    double impulse =
+                        2 * (a[3]*nx + a[4]*ny - b[3]*nx - b[4]*ny) / 2.0;
+
+                    a[3] -= impulse * nx;
+                    a[4] -= impulse * ny;
+                    b[3] += impulse * nx;
+                    b[4] += impulse * ny;
+
+                    double overlap = minDist - dist;
+
+                    a[1] -= nx * overlap / 2;
+                    a[2] -= ny * overlap / 2;
+                    b[1] += nx * overlap / 2;
+                    b[2] += ny * overlap / 2;
+                }
+            }
+        }
+
+        // classify circles (stay / transfer / boundary)
+        List<double[]> remaining = new ArrayList<>();
+
+        // rebuild grid here — not ideal but keeps workers independent
+        Region[] allRegions = Region.buildGrid(screenW, screenH, numWorkers);
+
+        for (double[] c : circles) {
+
+            int id = (int) c[0];
+
+            double x = c[1];
+            double y = c[2];
+            double dx = c[3];
+            double dy = c[4];
+
+            int radius = (int) c[5];
+            int r = (int) c[6];
+            int g = (int) c[7];
+            int b = (int) c[8];
+
+            if (!region.contains(x, y)) {
+                // moved out → send to main for reassignment
+                int target = Region.findRegion(x, y, allRegions);
+
+                outQueue.send(MessageParser.encodeTransfer(
+                    id, x, y, dx, dy, radius, r, g, b, target
+                ));
+            } else {
+                remaining.add(c);
+
+                outQueue.send(MessageParser.encodeState(id, x, y, dx, dy));
+
+                // near boundary → main needs to check cross-region collisions
+                if (region.isNearBoundary(x, y, radius, screenW, screenH)) {
+                    outQueue.send(MessageParser.encodeBoundary(
+                        id, x, y, dx, dy, radius
+                    ));
+                }
+            }
+        }
+
+        circles.clear();
+        circles.addAll(remaining);
+
+        // tell main we're done with this tick
+        outQueue.send(MessageParser.encodeDone(workerIndex));
+    }
+
+    // apply updates from cross-region collisions
+    private void handleUpdate(String msg) {
+        double[] parsed = MessageParser.parseIdXYDxDy(msg);
+        int id = (int) parsed[0];
+
+        for (double[] c : circles) {
+            if ((int) c[0] == id) {
+                c[1] = parsed[1];
+                c[2] = parsed[2];
+                c[3] = parsed[3];
+                c[4] = parsed[4];
+                break;
+            }
+        }
+    }
+}
