@@ -1,0 +1,101 @@
+// MessageQueue.java
+// simple thread-safe queue for passing string messages between threads
+// uses wait()/notifyAll() only — no concurrent collections
+// simple linked list node (KEEP lightweight)
+
+public class MessageQueue {
+    // basic linked list node
+    private static class Node {
+        String value;
+        Node next;
+
+        Node(String value) {
+            this.value = value;
+        }
+    }
+
+    private Node head;
+    private Node tail;
+
+    private int size;
+    private final int capacity;
+
+    private volatile boolean shutdown = false;
+
+    public MessageQueue(int capacity) {
+        this.capacity = capacity;
+    }
+
+    // add a message to the queue
+    // blocks if the queue is full
+    public synchronized void send(String message) throws InterruptedException {
+        while (size >= capacity && !shutdown) {
+            wait();
+        }
+
+        if (shutdown) return;
+
+        Node node = new Node(message);
+
+        if (tail == null) {
+            head = tail = node;
+        } else {
+            tail.next = node;
+            tail = node;
+        }
+
+        size++;
+        notifyAll();
+    }
+
+    // take the next message (blocking)
+    // returns null if shutdown and empty
+    public synchronized String receive() throws InterruptedException {
+        while (size == 0 && !shutdown) {
+            wait();
+        }
+
+        if (size == 0) return null;
+
+        String value = head.value;
+        head = head.next;
+
+        if (head == null) {
+            tail = null;
+        }
+
+        size--;
+        notifyAll();
+        return value;
+    }
+
+    // non-blocking version of receive
+    public synchronized String poll() {
+        if (size == 0) return null;
+
+        String value = head.value;
+        head = head.next;
+
+        if (head == null) {
+            tail = null;
+        }
+
+        size--;
+        notifyAll();
+        return value;
+    }
+
+    // signal all waiting threads to stop
+    public synchronized void shutdown() {
+        shutdown = true;
+        notifyAll();
+    }
+
+    public synchronized int size() {
+        return size;
+    }
+
+    public synchronized boolean isShutdown() {
+        return shutdown;
+    }
+}
