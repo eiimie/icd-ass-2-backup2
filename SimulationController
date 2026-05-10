@@ -10,11 +10,11 @@ public class SimulationController {
 
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 720;
-    private static final int NUMBER_OF_CIRCLES = 500000;
+    private static final int NUMBER_OF_CIRCLES = 50000;
     private static final int NUMBER_OF_WORKERS = 4;
     private static final int MAX_ITERATIONS = 10_000_000;
     private static final int QUEUE_CAPACITY = 10000;
-    private static final int TIMER_DELAY_MS = 20;
+    private static final int TIMER_DELAY_MS = 0;
 
     // ── core components 
 
@@ -97,10 +97,9 @@ public class SimulationController {
     // ── main loop
 
     private void run() throws InterruptedException {
-
         while (iteration < MAX_ITERATIONS) {
+            long startTime = System.nanoTime();
 
-            // tell all workers to advance one tick
             String tick = MessageParser.encodeTick(iteration);
             for (MessageQueue q : inbound) {
                 q.send(tick);
@@ -110,28 +109,24 @@ public class SimulationController {
             List<String> boundaryMsgs = new ArrayList<>();
             List<String> transferMsgs = new ArrayList<>();
 
-            // collect worker output
+            // collect output
             while (finishedWorkers < NUMBER_OF_WORKERS) {
                 for (MessageQueue q : outbound) {
-
                     String msg = q.poll();
                     if (msg == null) continue;
-
                     switch (MessageParser.getType(msg)) {
-                        case "STATE"    -> updateState(msg);
+                        case "STATE" -> updateState(msg);
                         case "BOUNDARY" -> boundaryMsgs.add(msg);
                         case "TRANSFER" -> transferMsgs.add(msg);
-                        case "DONE"     -> finishedWorkers++;
+                        case "DONE" -> finishedWorkers++;
                     }
                 }
             }
 
-            // drain remaining messages
             for (MessageQueue q : outbound) {
                 String msg;
                 while ((msg = q.poll()) != null) {
                     String type = MessageParser.getType(msg);
-
                     if (type.equals("STATE")) updateState(msg);
                     else if (type.equals("BOUNDARY")) boundaryMsgs.add(msg);
                     else if (type.equals("TRANSFER")) transferMsgs.add(msg);
@@ -140,17 +135,21 @@ public class SimulationController {
 
             resolveCrossRegionCollisions(boundaryMsgs);
             handleTransfers(transferMsgs);
-            pushToRenderer();
+            pushToRenderer();--
+
+            long endTime = System.nanoTime();
+            double tickMs = (endTime - startTime) / 1_000_000.0;
+
+            if (iteration % 100 == 0) {
+                System.out.println("Tick " + iteration + " took " + tickMs + " ms");
+            }
 
             iteration++;
-            updateFps();
 
             if (TIMER_DELAY_MS > 0) {
                 Thread.sleep(TIMER_DELAY_MS);
             }
         }
-
-        shutdown();
     }
 
     // ── message handling
@@ -311,4 +310,5 @@ public class SimulationController {
         simThread.setDaemon(true);
         simThread.start();
     }
+    
 }
