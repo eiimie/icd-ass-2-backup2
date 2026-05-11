@@ -9,7 +9,7 @@ public class SimulationController {
 
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 720;
-    private static final int NUMBER_OF_CIRCLES = 500;
+    private static final int NUMBER_OF_CIRCLES = 100;
     private static final int NUMBER_OF_WORKERS = 4;
     private static final int MAX_ITERATIONS = 10_000_000;
     private static final int QUEUE_CAPACITY = 10000;
